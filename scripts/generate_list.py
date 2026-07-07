@@ -52,6 +52,24 @@ def parse_int_safe(value: str):
             return None
 
 
+def to_e164_from_national(raw: str):
+    """
+    Convertit un Tranche_Debut/Fin MAJNUM en E.164 Int64, robuste au format.
+    MAJNUM donne un numéro national de 10 chiffres commençant par 0
+    (ex: '0162000000'). Selon la source, le 0 initial peut manquer
+    ('162000000') ou le nombre être en notation scientifique.
+    Résultat : 33 + les 9 chiffres après le 0 initial.
+    """
+    val = parse_int_safe(raw)
+    if val is None:
+        return None
+    # Rembourre à 10 chiffres pour reconstituer le 0 initial perdu par int()
+    national = str(val).zfill(10)
+    if len(national) != 10 or not national.startswith("0"):
+        return None
+    return int("33" + national[1:])
+
+
 def build_racines(majnum_text: str) -> dict:
     """Construit le dictionnaire racine -> liste de tranches E.164."""
     racines = {p: [] for p in DEMARCHAGE_PREFIXES}
@@ -62,17 +80,30 @@ def build_racines(majnum_text: str) -> dict:
         fin_raw = (row.get("Tranche_Fin") or "").strip()
         if not debut_raw:
             continue
+
+        # On normalise d'abord le début en national à 10 chiffres pour
+        # tester le préfixe de façon fiable (avec ou sans 0 de tête).
+        val = parse_int_safe(debut_raw)
+        if val is None:
+            continue
+        debut_national = str(val).zfill(10)
+
         for prefix in DEMARCHAGE_PREFIXES:
-            if debut_raw.startswith(prefix):
-                debut = parse_int_safe(debut_raw)
-                fin = parse_int_safe(fin_raw)
-                if debut is None or fin is None:
+            if debut_national.startswith(prefix):
+                debut_e164 = to_e164_from_national(debut_raw)
+                fin_e164 = to_e164_from_national(fin_raw)
+                if debut_e164 is None or fin_e164 is None:
                     break
-                # Conversion nationale -> E.164 : 0XXXXXXXXX -> 33XXXXXXXXX
-                debut_e164 = int("33" + str(debut)[1:])
-                fin_e164 = int("33" + str(fin)[1:])
                 racines[prefix].append([debut_e164, fin_e164])
                 break
+
+    # Retire les racines vides, trie les tranches
+    result = {}
+    for prefix, tranches in racines.items():
+        if tranches:
+            tranches.sort()
+            result[prefix] = tranches
+    return result
 
     # Retire les racines vides, trie les tranches
     result = {}
