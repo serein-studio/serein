@@ -84,13 +84,25 @@ def build_racines(majnum_text: str) -> dict:
 
 
 def national_to_e164(national: str):
-    """0759254806 -> 33759254806. Renvoie None si invalide."""
+    """
+    Convertit un numéro national en E.164.
+    Gère les cas : 0759254806, 759254806 (0 perdu par le Sheet), 33759254806.
+    Renvoie None si invalide.
+    """
     digits = "".join(c for c in national if c.isdigit())
-    if digits.startswith("33"):
-        digits = "0" + digits[2:]
-    if len(digits) < 6:
+    if not digits:
         return None
-    return int("33" + digits[1:]) if digits.startswith("0") else None
+    # Déjà en E.164 (33...)
+    if digits.startswith("33") and len(digits) >= 11:
+        return int(digits)
+    # Format national avec 0 initial
+    if digits.startswith("0"):
+        return int("33" + digits[1:])
+    # Le 0 initial a été perdu (ex: Sheet qui traite le numéro comme un nombre)
+    # Un numéro français national fait 9 chiffres après le 0 (ex: 759254806)
+    if len(digits) == 9:
+        return int("33" + digits)
+    return None
 
 
 def fetch_signalements(url: str) -> list:
@@ -123,6 +135,11 @@ def build_priority(signalements: list, racines: dict) -> list:
         prefixe = str(sig.get("prefixe", "")).strip()
         date_str = str(sig.get("date", "")).strip()
         verifie = str(sig.get("verifie", "")).strip().upper()
+
+        # Le Sheet peut avoir supprimé le 0 initial (traite comme un nombre).
+        # On reconstitue un préfixe à 4 chiffres avec 0 devant si besoin.
+        if prefixe and not prefixe.startswith("0") and len(prefixe) == 3:
+            prefixe = "0" + prefixe
 
         is_test = (verifie == "TEST")
 
