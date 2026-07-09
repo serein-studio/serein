@@ -1,14 +1,13 @@
 name: Générer la liste anti-démarchage
 
 # Déclenchement :
-#   - chaque lundi à 6h UTC (hebdomadaire)
-#   - manuellement via l'onglet Actions (bouton "Run workflow")
+#   - tous les jours à 6h UTC (le fichier n'est republié que s'il a changé)
+#   - manuellement via l'onglet Actions
 on:
   schedule:
-    - cron: "0 6 * * 1"
+    - cron: "0 6 * * *"
   workflow_dispatch:
 
-# Permissions nécessaires pour que l'action puisse pousser le fichier
 permissions:
   contents: write
 
@@ -30,15 +29,15 @@ jobs:
         run: |
           python scripts/generate_list.py "$SIGNALEMENTS_URL" demarchage_france.json
 
-      - name: Publier si le fichier a changé
+      - name: Publier si le contenu a changé
         run: |
           git config user.name "Serein Bot"
           git config user.email "bot@serein.local"
           if git diff --quiet demarchage_france.json; then
-            echo "Aucun changement dans la liste."
+            echo "Contenu inchangé, rien à publier."
           else
             git add demarchage_france.json
-            git commit -m "Mise à jour automatique de la liste anti-démarchage"
+            git commit -m "Mise à jour de la liste anti-démarchage"
             git push
             echo "Liste mise à jour et publiée."
           fi
