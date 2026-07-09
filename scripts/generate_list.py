@@ -144,63 +144,90 @@ def fetch_signalements(url: str) -> list:
     return data.get("signalements", [])
 
 
+MIN_DISTINCT_REPORTS = 3   # nb de personnes distinctes requises hors préfixes connus
+
+
 def build_priority(signalements: list, racines: dict) -> list:
     """
-    Filtre les signalements pour la couche priority. Un numéro est retenu si :
+    Détermine les numéros de la couche priority.
 
-      CAS NORMAL :
-        1. son préfixe est une des 12 racines de démarchage
-        2. il est signalé il y a moins d'un an
-      OU CAS TEST :
-        la colonne "Vérifié" vaut "TEST" (insensible à la casse) — quel que
-        soit le préfixe et la date. Permet d'ajouter des numéros de test.
+    Règles :
+      - CAS TEST : "Vérifié" == "TEST" → toujours retenu (préfixe/date ignorés).
+      - CAS PRÉFIXE CONNU : numéro dont le préfixe est une des 12 racines de
+        démarchage → 1 signalement suffit (le préfixe est déjà un garde-fou),
+        sous réserve d'être signalé il y a moins d'un an.
+      - CAS HORS PRÉFIXE : numéro hors des 12 racines → retenu seulement s'il a
+        été signalé par au moins MIN_DISTINCT_REPORTS personnes DISTINCTES
+        (UUID anonymes différents), toutes de moins d'un an.
 
-    Dans tous les cas, la liste finale est dédupliquée.
+    Résultat dédupliqué, trié.
     """
     one_year_ago = datetime.now(timezone.utc) - timedelta(days=365)
-    seen = set()
-    priority = []
+
+    def parse_date(s: str):
+        try:
+            d = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            return d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d
+        except (ValueError, AttributeError):
+            return None
+
+    def prefix_of(national: str) -> str:
+        p = national[:4]
+        if p and not p.startswith("0") and len(p) == 3:
+            p = "0" + p
+        return p
+
+    # 1) On agrège par numéro E.164 : liste des UUID distincts récents + flags
+    #    { e164: {"uuids": set(), "known": bool, "test": bool} }
+    agg = {}
 
     for sig in signalements:
         national = str(sig.get("numero", "")).strip()
         prefixe = str(sig.get("prefixe", "")).strip()
         date_str = str(sig.get("date", "")).strip()
         verifie = str(sig.get("verifie", "")).strip().upper()
+        uuid = str(sig.get("uuid", "")).strip()
 
-        # Le Sheet peut avoir supprimé le 0 initial (traite comme un nombre).
-        # On reconstitue un préfixe à 4 chiffres avec 0 devant si besoin.
+        # Normalise le préfixe (0 initial éventuellement perdu par le Sheet)
         if prefixe and not prefixe.startswith("0") and len(prefixe) == 3:
             prefixe = "0" + prefixe
 
-        is_test = (verifie == "TEST")
-
-        if not is_test:
-            # CAS NORMAL : préfixe parmi les 12 racines de démarchage
-            if prefixe not in DEMARCHAGE_PREFIXES:
-                if not any(national.startswith(p) for p in DEMARCHAGE_PREFIXES):
-                    continue
-
-            # Moins d'un an
-            try:
-                sig_date = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-                if sig_date.tzinfo is None:
-                    sig_date = sig_date.replace(tzinfo=timezone.utc)
-                if sig_date < one_year_ago:
-                    continue
-            except (ValueError, AttributeError):
-                continue
-        # CAS TEST : on saute toutes les vérifications ci-dessus
-
-        # Conversion E.164
         e164 = national_to_e164(national)
         if e164 is None:
             continue
 
-        # Déduplication (commune aux deux cas)
-        if e164 in seen:
+        entry = agg.setdefault(e164, {"uuids": set(), "known": False, "test": False})
+
+        # Cas TEST : marque et continue (pas de contrainte)
+        if verifie == "TEST":
+            entry["test"] = True
             continue
-        seen.add(e164)
-        priority.append(e164)
+
+        # Date : ignore les signalements de plus d'un an
+        d = parse_date(date_str)
+        if d is None or d < one_year_ago:
+            continue
+
+        # Préfixe connu ?
+        is_known = (prefixe in DEMARCHAGE_PREFIXES) or \
+                   any(national.startswith(p) for p in DEMARCHAGE_PREFIXES) or \
+                   (prefix_of(national) in DEMARCHAGE_PREFIXES)
+        if is_known:
+            entry["known"] = True
+
+        # Compte l'UUID (une chaîne vide compte comme un signalement anonyme
+        # unique fallback, pour ne pas perdre les anciens signalements sans uuid)
+        entry["uuids"].add(uuid if uuid else f"legacy-{len(entry['uuids'])}")
+
+    # 2) On applique les règles
+    priority = []
+    for e164, info in agg.items():
+        if info["test"]:
+            priority.append(e164)                      # TEST : toujours
+        elif info["known"]:
+            priority.append(e164)                      # préfixe connu : 1 suffit
+        elif len(info["uuids"]) >= MIN_DISTINCT_REPORTS:
+            priority.append(e164)                      # hors préfixe : ≥ N distincts
 
     priority.sort()
     return priority
