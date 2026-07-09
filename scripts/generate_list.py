@@ -13,9 +13,11 @@
 # Usage : python generate_list.py <URL_SIGNALEMENTS> <sortie.json>
 
 import sys
+import os
 import csv
 import io
 import json
+import hashlib
 import urllib.request
 from datetime import datetime, timezone, timedelta
 
@@ -233,6 +235,27 @@ def build_priority(signalements: list, racines: dict) -> list:
     return priority
 
 
+def content_hash(priority: list, racines: dict) -> str:
+    """Empreinte stable du contenu (indépendante de la date)."""
+    payload = json.dumps(
+        {"priority": priority, "racines": racines},
+        sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def read_existing(path: str):
+    """Lit le fichier existant s'il y en a un. Renvoie (hash, version) ou (None, None)."""
+    if not os.path.exists(path):
+        return None, None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("hash"), data.get("version")
+    except (json.JSONDecodeError, OSError):
+        return None, None
+
+
 def main():
     if len(sys.argv) < 3:
         print("Usage: generate_list.py <URL_SIGNALEMENTS> <sortie.json>")
@@ -260,8 +283,23 @@ def main():
     priority = build_priority(signalements, racines)
     print(f"  {len(priority)} numéros prioritaires après filtrage")
 
+    # Empreinte du contenu réel
+    new_hash = content_hash(priority, racines)
+    old_hash, old_version = read_existing(output_path)
+
+    if old_hash == new_hash:
+        # Les données n'ont pas changé : on ne touche à rien.
+        print(f"\nContenu identique (hash {new_hash}). Aucune mise à jour.")
+        print(f"  version conservée : {old_version}")
+        return
+
+    # Les données ont changé : nouvelle date de version
+    new_version = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    print(f"\nContenu modifié (ancien hash {old_hash}, nouveau {new_hash})")
+
     payload = {
-        "version": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "version": new_version,   # date lisible, affichée à l'utilisateur
+        "hash": new_hash,         # empreinte, pour la détection de changement
         "priority": priority,
         "racines": racines,
     }
@@ -269,10 +307,10 @@ def main():
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, separators=(",", ":"), ensure_ascii=False)
 
-    import os
     size = os.path.getsize(output_path)
     print(f"Fichier écrit : {output_path} ({size:,} octets)")
-    print(f"  version  : {payload['version']}")
+    print(f"  version  : {new_version}")
+    print(f"  hash     : {new_hash}")
     print(f"  priority : {len(priority)}")
     print(f"  racines  : {list(racines.keys())}")
 
