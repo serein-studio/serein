@@ -82,19 +82,17 @@ GUARANTEE_LIFETIME_DAYS = 90
 OPERATOR_SPREAD_BONUS = 0.5
 OPERATOR_SCORE_THRESHOLD = 30.0
 
-# ⚠️ DOUBLE CONDITION VOLONTAIRE — score absolu ET part relative.
-# Le seuil ABSOLU seul devrait être recalibré à mesure que la base d'utilisateurs
-# grandit (avec 100 000 utilisateurs, tout opérateur le franchirait). La part
-# RELATIVE seule pourrait déclencher sur un échantillon minuscule. Exiger les
-# deux rend la règle robuste dans les deux régimes.
-OPERATOR_DOMINANCE_THRESHOLD = 0.60
-OPERATOR_MIN_DISTINCT_TRANCHES = 5
-
-# GARDE-FOU : ne JAMAIS déclencher sur un échantillon faible. Sans ces seuils,
+# ⚠️ GARDE-FOU : ne JAMAIS blacklister sur un échantillon faible. Sans ce seuil,
 # 17 signalements d'UNE seule personne suffiraient à désigner un opérateur —
-# du surapprentissage pur. La règle s'activera d'elle-même quand la base
-# d'utilisateurs le justifiera. Ne JAMAIS coder un opérateur en dur.
-OPERATOR_RULE_MIN_REPORTS = 100
+# du surapprentissage pur. La règle s'active d'elle-même quand la base
+# d'utilisateurs le justifie. Ne JAMAIS coder un opérateur en dur.
+#
+# ⚠️ C'EST CE COMPTEUR QUI PILOTE, PAS LE SCORE. Mesuré : 30 personnes signalant
+# une fois chacune un opérateur multi-racines produisent un score d'environ 105 —
+# le seuil de 30 points est donc franchi bien avant la condition UUID. La règle
+# réelle est aujourd'hui « 30 personnes distinctes, récemment ». Pour que le
+# score morde vraiment, il faudrait le monter vers 150-200 : à décider quand
+# stats.json aura montré la distribution réelle.
 OPERATOR_RULE_MIN_DISTINCT_UUIDS = 30
 
 MIN_DISTINCT_REPORTS = 3   # personnes distinctes requises hors préfixes connus
@@ -762,6 +760,28 @@ def main():
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, separators=(",", ":"), ensure_ascii=False)
+
+    # ─── Table de correspondance tranche → opérateur ────────────────────────
+    # Publiée pour l'Apps Script, qui l'utilise pour renseigner la colonne
+    # "Opérateur" du Sheet des signalements au moment de l'insertion.
+    # Pourquoi ici : ce script est la SEULE source de vérité pour le parsing de
+    # MAJNUM (encodage cp1252, 0 initial absent, notation scientifique). Faire
+    # retélécharger et reparser 1,1 Mo à l'Apps Script à chaque signalement
+    # serait absurde — cette table fait ~900 lignes, quelques dizaines de Ko.
+    # ⚠️ La valeur écrite dans le Sheet est INFORMATIVE : elle sert à l'analyse
+    # humaine, jamais au pipeline (qui recalcule l'opérateur à chaque exécution
+    # depuis un MAJNUM frais). Elle peut donc devenir périmée si l'ARCEP
+    # réattribue une tranche — sans conséquence.
+    ops_path = os.path.join(os.path.dirname(output_path) or ".", "tranches_operateurs.json")
+    with open(ops_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "version": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            # [debut_e164, fin_e164, operateur], trié par debut croissant
+            # (permet une recherche dichotomique côté Apps Script)
+            "tranches": [[t.start, t.end, t.operateur] for t in tranches],
+        }, f, separators=(",", ":"), ensure_ascii=False)
+    print(f"Table écrite  : {ops_path} ({os.path.getsize(ops_path):,} octets, "
+          f"{len(tranches)} tranches)")
 
     # Fichier de stats séparé : observation uniquement, aucun impact filtrage.
     stats_path = os.path.join(os.path.dirname(output_path) or ".", "stats.json")
