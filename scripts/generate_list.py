@@ -733,6 +733,43 @@ def main():
         coverage_by_racine[r] = {"total": tot, "covered": cov}
         print(f"  {r} : {cov:>7,} / {tot:>7,}  ({cov/tot*100:5.1f}%)  quota {quota[r]:,}")
 
+    # ⚠️ CES DEUX FICHIERS S'ÉCRIVENT AVANT LE TEST DE HASH.
+    # Ils ne dépendent PAS de la sélection : tranches_operateurs.json ne dépend
+    # que de MAJNUM. Les placer après le `return` du hash identique les aurait
+    # rendus invisibles dès la 2e exécution (bug constaté en production).
+    # ─── Table de correspondance tranche → opérateur ────────────────────────
+    # Publiée pour l'Apps Script, qui l'utilise pour renseigner la colonne
+    # "Opérateur" du Sheet des signalements au moment de l'insertion.
+    # Pourquoi ici : ce script est la SEULE source de vérité pour le parsing de
+    # MAJNUM (encodage cp1252, 0 initial absent, notation scientifique). Faire
+    # retélécharger et reparser 1,1 Mo à l'Apps Script à chaque signalement
+    # serait absurde — cette table fait ~900 lignes, quelques dizaines de Ko.
+    # ⚠️ La valeur écrite dans le Sheet est INFORMATIVE : elle sert à l'analyse
+    # humaine, jamais au pipeline (qui recalcule l'opérateur à chaque exécution
+    # depuis un MAJNUM frais). Elle peut donc devenir périmée si l'ARCEP
+    # réattribue une tranche — sans conséquence.
+    ops_path = os.path.join(os.path.dirname(output_path) or ".", "tranches_operateurs.json")
+    with open(ops_path, "w", encoding="utf-8") as f:
+        # ⚠️ PAS de champ "version" daté ici : ce fichier ne doit changer QUE si
+        # MAJNUM change (~toutes les 3 semaines, après un collège ARCEP). Une
+        # date le ferait muter chaque jour et déclencherait un commit quotidien
+        # inutile — exactement ce que la détection par hash cherche à éviter.
+        json.dump({
+            # [debut_e164, fin_e164, operateur], trié par debut croissant
+            # (permet une recherche dichotomique côté Apps Script)
+            "tranches": [[t.start, t.end, t.operateur] for t in tranches],
+        }, f, separators=(",", ":"), ensure_ascii=False)
+    print(f"Table écrite  : {ops_path} ({os.path.getsize(ops_path):,} octets, "
+          f"{len(tranches)} tranches)")
+
+    # Fichier de stats séparé : observation uniquement, aucun impact filtrage.
+    stats_path = os.path.join(os.path.dirname(output_path) or ".", "stats.json")
+    with open(stats_path, "w", encoding="utf-8") as f:
+        json.dump(build_stats(tranches, selected, reports, group_of,
+                              op_scores, op_uuids, blacklist, gdiag),
+                  f, indent=2, ensure_ascii=False)
+
+
     new_hash = content_hash(priority, racines)
     old_hash, old_version = read_existing(output_path)
 
@@ -760,35 +797,6 @@ def main():
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, separators=(",", ":"), ensure_ascii=False)
-
-    # ─── Table de correspondance tranche → opérateur ────────────────────────
-    # Publiée pour l'Apps Script, qui l'utilise pour renseigner la colonne
-    # "Opérateur" du Sheet des signalements au moment de l'insertion.
-    # Pourquoi ici : ce script est la SEULE source de vérité pour le parsing de
-    # MAJNUM (encodage cp1252, 0 initial absent, notation scientifique). Faire
-    # retélécharger et reparser 1,1 Mo à l'Apps Script à chaque signalement
-    # serait absurde — cette table fait ~900 lignes, quelques dizaines de Ko.
-    # ⚠️ La valeur écrite dans le Sheet est INFORMATIVE : elle sert à l'analyse
-    # humaine, jamais au pipeline (qui recalcule l'opérateur à chaque exécution
-    # depuis un MAJNUM frais). Elle peut donc devenir périmée si l'ARCEP
-    # réattribue une tranche — sans conséquence.
-    ops_path = os.path.join(os.path.dirname(output_path) or ".", "tranches_operateurs.json")
-    with open(ops_path, "w", encoding="utf-8") as f:
-        json.dump({
-            "version": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-            # [debut_e164, fin_e164, operateur], trié par debut croissant
-            # (permet une recherche dichotomique côté Apps Script)
-            "tranches": [[t.start, t.end, t.operateur] for t in tranches],
-        }, f, separators=(",", ":"), ensure_ascii=False)
-    print(f"Table écrite  : {ops_path} ({os.path.getsize(ops_path):,} octets, "
-          f"{len(tranches)} tranches)")
-
-    # Fichier de stats séparé : observation uniquement, aucun impact filtrage.
-    stats_path = os.path.join(os.path.dirname(output_path) or ".", "stats.json")
-    with open(stats_path, "w", encoding="utf-8") as f:
-        json.dump(build_stats(tranches, selected, reports, group_of,
-                              op_scores, op_uuids, blacklist, gdiag),
-                  f, indent=2, ensure_ascii=False)
 
     size = os.path.getsize(output_path)
     print(f"Fichier écrit : {output_path} ({size:,} octets)")
