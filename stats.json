@@ -1,0 +1,49 @@
+{
+  "garanties": {
+    "directes": 2,
+    "groupe_contigu": 8,
+    "operateur_blackliste": 0,
+    "cout_numeros": 10000
+  },
+  "seuils": {
+    "score_blacklist": 30.0,
+    "uuid_distincts_min": 30,
+    "duree_vie_garantie_jours": 90,
+    "demi_vie_jours": 90
+  },
+  "operateurs_blacklistes": [],
+  "par_operateur": [
+    {
+      "operateur": "KAVE",
+      "score": 1.86,
+      "blackliste": false,
+      "signalements": 2,
+      "poids_decroissant": 1.86,
+      "tranches_distinctes": 1,
+      "uuid_distincts": 0
+    },
+    {
+      "operateur": "QWLK",
+      "score": 0.99,
+      "blackliste": false,
+      "signalements": 1,
+      "poids_decroissant": 0.99,
+      "tranches_distinctes": 1,
+      "uuid_distincts": 1
+    }
+  ],
+  "groupes_les_plus_signales": [
+    {
+      "groupe": 153,
+      "operateur": "KAVE",
+      "racine": "0270",
+      "signalements": 2
+    },
+    {
+      "groupe": 522,
+      "operateur": "QWLK",
+      "racine": "0948",
+      "signalements": 1
+    }
+  ]
+}
