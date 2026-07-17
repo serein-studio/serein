@@ -62,11 +62,31 @@ W_DIRECT = 3.0     # signalement DANS la tranche : signal le plus fort
 W_GROUP = 1.0      # signalement dans le même groupe contigu : anticipe la rotation
 W_OPERATOR = 0.5   # opérateur dominant : signal le plus large, le plus faible
 
+# ─── DURÉE DE VIE DE LA GARANTIE ────────────────────────────────────────────
+# Une tranche n'est GARANTIE que si elle a un signalement de moins de N jours.
+# Au-delà, elle continue de scorer (avec décroissance) mais perd sa place
+# réservée. C'est ce qui empêche la garantie de s'accumuler indéfiniment et de
+# saturer le budget : la liste reste braquée sur les démarcheurs ACTIFS.
+GUARANTEE_LIFETIME_DAYS = 90
+
 # ─── RÈGLE DE DOMINANCE D'OPÉRATEUR ─────────────────────────────────────────
 # Un opérateur n'est "dominant" que s'il concentre une grande part des
 # signalements ET les disperse sur plusieurs tranches.
 # Rationnel : 10 signalements dans UNE tranche = un client isolé. 10 sur 8
 # tranches = l'opérateur vend en masse à des acteurs agressifs.
+# Score d'un opérateur : somme des poids décroissants de ses signalements,
+# multipliée par un bonus de DISPERSION sur les racines. Un même opérateur
+# signalé sur plusieurs racines révèle un acteur qui alterne pour échapper au
+# filtrage — signal plus fort que le même volume concentré sur une racine.
+#   score_op = Σ(w) × (1 + OPERATOR_SPREAD_BONUS × (nb_racines_touchées - 1))
+OPERATOR_SPREAD_BONUS = 0.5
+OPERATOR_SCORE_THRESHOLD = 30.0
+
+# ⚠️ DOUBLE CONDITION VOLONTAIRE — score absolu ET part relative.
+# Le seuil ABSOLU seul devrait être recalibré à mesure que la base d'utilisateurs
+# grandit (avec 100 000 utilisateurs, tout opérateur le franchirait). La part
+# RELATIVE seule pourrait déclencher sur un échantillon minuscule. Exiger les
+# deux rend la règle robuste dans les deux régimes.
 OPERATOR_DOMINANCE_THRESHOLD = 0.60
 OPERATOR_MIN_DISTINCT_TRANCHES = 5
 
@@ -302,7 +322,9 @@ def extract_scoring_reports(signalements: list) -> list:
     """
     Extrait les signalements exploitables pour le SCORING (distinct de priority).
     Ne garde que ceux qui tombent dans une racine connue et datent de moins d'un an.
-    Renvoie [(e164, poids_décroissant, uuid)].
+    Renvoie [(e164, poids_décroissant, uuid, age_jours)].
+    L'âge sert à distinguer les signalements qui ouvrent droit à la GARANTIE
+    (< GUARANTEE_LIFETIME_DAYS) de ceux qui ne font plus que scorer.
     """
     now = datetime.now(timezone.utc)
     one_year_ago = now - timedelta(days=365)
@@ -323,7 +345,7 @@ def extract_scoring_reports(signalements: list) -> list:
         age_days = max(0.0, (now - d).total_seconds() / 86400.0)
         weight = 0.5 ** (age_days / HALF_LIFE_DAYS)
         uuid = str(sig.get("uuid", "")).strip()
-        out.append((e164, weight, uuid))
+        out.append((e164, weight, uuid, age_days))
 
     return out
 
@@ -347,61 +369,97 @@ def locate(tranches: list, e164: int):
     return None
 
 
-def compute_dominant_operators(tranches: list, reports: list) -> tuple:
+def compute_operator_scores(tranches: list, reports: list) -> tuple:
     """
-    Détermine les opérateurs dominants. Renvoie (set_dominants, diagnostic).
-    Inerte tant que les garde-fous ne sont pas franchis.
+    Score continu par opérateur, avec décroissance et bonus de dispersion.
+
+        score_op = Σ(poids) × (1 + OPERATOR_SPREAD_BONUS × (racines - 1))
+
+    Renvoie (dict op -> score, dict op -> uuids, set des opérateurs blacklistés).
+    Un opérateur est blacklisté (toutes ses tranches garanties) si son score
+    dépasse OPERATOR_SCORE_THRESHOLD ET qu'il a été signalé par au moins
+    OPERATOR_RULE_MIN_DISTINCT_UUIDS personnes distinctes.
     """
-    diag = {
-        "reports_on_known_racines": 0,
-        "distinct_uuids": 0,
-        "rule_active": False,
-        "dominant": [],
-    }
+    weight_by_op = defaultdict(float)
+    racines_by_op = defaultdict(set)
+    uuids_by_op = defaultdict(set)
 
-    by_op_weight = defaultdict(float)
-    by_op_tranches = defaultdict(set)
-    uuids = set()
-    total_weight = 0.0
-    n_reports = 0
-
-    for e164, weight, uuid in reports:
+    for e164, weight, uuid, _age in reports:
         i = locate(tranches, e164)
         if i is None:
-            continue  # hors racines connues : ne compte pas dans la dominance
-        op = tranches[i].operateur
-        by_op_weight[op] += weight
-        by_op_tranches[op].add(i)
-        total_weight += weight
-        n_reports += 1
+            continue  # hors racines connues : ne compte pas pour l'opérateur
+        t = tranches[i]
+        weight_by_op[t.operateur] += weight
+        racines_by_op[t.operateur].add(t.racine)
         if uuid:
-            uuids.add(uuid)
+            uuids_by_op[t.operateur].add(uuid)
 
-    diag["reports_on_known_racines"] = n_reports
-    diag["distinct_uuids"] = len(uuids)
+    scores = {}
+    blacklist = set()
+    for op, w in weight_by_op.items():
+        spread = len(racines_by_op[op])
+        score = w * (1 + OPERATOR_SPREAD_BONUS * (spread - 1))
+        scores[op] = score
+        if score >= OPERATOR_SCORE_THRESHOLD and \
+           len(uuids_by_op[op]) >= OPERATOR_RULE_MIN_DISTINCT_UUIDS:
+            blacklist.add(op)
 
-    # ⚠️ GARDE-FOU : échantillon trop faible → règle inerte.
-    if n_reports < OPERATOR_RULE_MIN_REPORTS or len(uuids) < OPERATOR_RULE_MIN_DISTINCT_UUIDS:
-        return set(), diag
-
-    diag["rule_active"] = True
-    dominant = set()
-    for op, w in by_op_weight.items():
-        share = w / total_weight if total_weight else 0.0
-        spread = len(by_op_tranches[op])
-        if share > OPERATOR_DOMINANCE_THRESHOLD and spread >= OPERATOR_MIN_DISTINCT_TRANCHES:
-            dominant.add(op)
-            diag["dominant"].append({"operateur": op, "part": round(share, 3), "tranches": spread})
-
-    return dominant, diag
+    return scores, uuids_by_op, blacklist
 
 
-def compute_scores(tranches: list, group_of: dict, reports: list, dominant: set) -> list:
+def compute_guaranteed(tranches: list, group_of: dict, reports: list,
+                       blacklist: set) -> tuple:
     """
-    Score continu par tranche :
+    Ensemble des tranches GARANTIES, c'est-à-dire retenues hors quota.
+
+    Trois sources, par ordre de force du signal :
+      1. DIRECTE  — la tranche contient un signalement de moins de
+         GUARANTEE_LIFETIME_DAYS jours. Exigence produit : si 0948498100 est
+         signalé, les 1 000 numéros de sa tranche doivent être dans la liste.
+      2. GROUPE   — la tranche appartient au même GROUPE CONTIGU et au même
+         opérateur qu'une tranche directe. C'est le lot d'achat : on anticipe la
+         rotation du démarcheur dans ses propres numéros. Constat : KAVE détient
+         0270290→296 en bloc, et les appels sont venus de 290 (mars), 292 (juin),
+         puis 294 (juillet) — il monte dans son lot.
+      3. OPÉRATEUR — toutes les tranches d'un opérateur blacklisté.
+
+    ⚠️ La garantie EXPIRE : un signalement de plus de GUARANTEE_LIFETIME_DAYS ne
+    garantit plus rien (il continue de peser dans les scores jusqu'à 1 an).
+
+    Renvoie (set garanti, diagnostic).
+    """
+    direct, group_ids = set(), set()
+    for e164, _w, _u, age in reports:
+        if age > GUARANTEE_LIFETIME_DAYS:
+            continue  # garantie expirée : use it or lose it
+        i = locate(tranches, e164)
+        if i is None:
+            continue
+        direct.add(i)
+        group_ids.add(group_of[i])
+
+    group = {i for i in range(len(tranches)) if group_of[i] in group_ids} - direct
+    operator = {i for i, t in enumerate(tranches) if t.operateur in blacklist}
+    operator -= (direct | group)
+
+    diag = {
+        "directes": len(direct),
+        "groupe_contigu": len(group),
+        "operateur_blackliste": len(operator),
+        "cout_numeros": sum(tranches[i].size for i in (direct | group | operator)),
+    }
+    return direct | group | operator, diag
+
+
+def compute_scores(tranches: list, group_of: dict, reports: list,
+                   op_scores: dict) -> list:
+    """
+    Score continu par tranche. Ne sert plus qu'à ORDONNER les tranches NON
+    garanties dans le budget restant (les garanties sont prises hors quota).
+
         W_DIRECT   * Σ(poids des signalements DANS la tranche)
-      + W_GROUP    * Σ(poids des signalements dans le MÊME GROUPE CONTIGU)
-      + W_OPERATOR * (1 si opérateur dominant)
+      + W_GROUP    * Σ(poids des signalements du MÊME GROUPE CONTIGU)
+      + W_OPERATOR * score de l'opérateur, normalisé
 
     Zéro signalement → tous les scores à 0 → le tri retombe sur start croissant,
     c'est-à-dire exactement la stratégie "quota proportionnel" pure. Le
@@ -410,53 +468,94 @@ def compute_scores(tranches: list, group_of: dict, reports: list, dominant: set)
     direct = defaultdict(float)
     group_weight = defaultdict(float)
 
-    for e164, weight, _ in reports:
+    for e164, weight, _u, _age in reports:
         i = locate(tranches, e164)
         if i is None:
             continue
         direct[i] += weight
         group_weight[group_of[i]] += weight
 
+    max_op = max(op_scores.values()) if op_scores else 0.0
+
     scores = []
     for i, t in enumerate(tranches):
-        s = W_DIRECT * direct.get(i, 0.0)
-        s += W_GROUP * group_weight.get(group_of[i], 0.0)
-        if t.operateur in dominant:
-            s += W_OPERATOR
-        scores.append(s)
+        s_ = W_DIRECT * direct.get(i, 0.0)
+        s_ += W_GROUP * group_weight.get(group_of[i], 0.0)
+        if max_op > 0:
+            s_ += W_OPERATOR * (op_scores.get(t.operateur, 0.0) / max_op)
+        scores.append(s_)
     return scores
 
 
-def select_tranches(tranches: list, scores: list, budget: int) -> tuple:
+def select_tranches(tranches: list, scores: list, guaranteed: set, budget: int) -> tuple:
     """
-    Sélection : quota proportionnel par racine, servi par score décroissant.
+    Sélection en deux temps.
 
-    Le quota garantit qu'aucune racine n'est sacrifiée entièrement (l'ancien
-    défaut : 0948 amputé de 61 %). Le score décide, À L'INTÉRIEUR du quota,
-    quelles tranches passent en premier.
+    1) GARANTIE DURE : toute tranche contenant un numéro signalé est retenue,
+       INCONDITIONNELLEMENT, hors quota. Exigence produit : si 0948498100 est
+       signalé, les 1 000 numéros de 0948498000→0948498999 doivent être dans la
+       liste — c'est ce qui neutralise la rotation du démarcheur dans sa tranche.
+       Sans ce passage, le quota pouvait écraser le score : test à l'appui,
+       19 tranches signalées sur 136 étaient sacrifiées quand 0948 était saturé.
 
-    Renvoie (set des index retenus, quotas).
+    2) Le budget RESTANT est réparti par quota proportionnel entre les racines,
+       servi par score décroissant. Le quota garantit qu'aucune racine n'est
+       sacrifiée en bloc (l'ancien défaut : 0948 amputé de 61 %).
+
+    Renvoie (set des index retenus, quotas du 2e temps).
     """
-    size_by_racine = defaultdict(int)
-    for t in tranches:
-        size_by_racine[t.racine] += t.size
-    total = sum(size_by_racine.values())
-    if total == 0:
+    if not tranches:
         return set(), {}
 
-    quota = {r: int(n / total * budget) for r, n in size_by_racine.items()}
+    # ── 1) Tranches signalées : garanties ───────────────────────────────────
+    selected = set()
+    used = defaultdict(int)
+    cost = sum(tranches[i].size for i in guaranteed)
+
+    if cost <= budget:
+        selected |= set(guaranteed)
+        for i in guaranteed:
+            used[tranches[i].racine] += tranches[i].size
+    else:
+        # Cas pathologique : les tranches signalées à elles seules dépassent le
+        # budget (il faudrait que ~91 % de l'espace soit signalé). La garantie
+        # devient physiquement impossible : on retombe sur le score décroissant.
+        print(f"  ⚠️ Tranches garanties ({cost:,}) > budget ({budget:,}) : "
+              f"garantie physiquement impossible, repli sur le score décroissant.",
+              file=sys.stderr)
+        order = sorted(guaranteed, key=lambda i: (-scores[i], tranches[i].start))
+        total = 0
+        for i in order:
+            if total + tranches[i].size <= budget:
+                selected.add(i)
+                used[tranches[i].racine] += tranches[i].size
+                total += tranches[i].size
+        return selected, {}
+
+    # ── 2) Le reste : quota proportionnel sur le budget restant ─────────────
+    remaining_budget = budget - cost
+    remaining_size = defaultdict(int)
+    for i, t in enumerate(tranches):
+        if i not in selected:
+            remaining_size[t.racine] += t.size
+    total_remaining = sum(remaining_size.values())
+    if total_remaining == 0:
+        return selected, {}
+
+    quota = {r: int(n / total_remaining * remaining_budget)
+             for r, n in remaining_size.items()}
 
     # Tri par (score décroissant, start croissant) — le start départage pour
     # rester déterministe (même entrée → même sortie → hash stable).
-    order = sorted(range(len(tranches)), key=lambda i: (-scores[i], tranches[i].start))
+    order = sorted((i for i in range(len(tranches)) if i not in selected),
+                   key=lambda i: (-scores[i], tranches[i].start))
 
-    selected = set()
-    used = defaultdict(int)
+    used2 = defaultdict(int)
     for i in order:
         t = tranches[i]
-        if used[t.racine] + t.size <= quota[t.racine]:
+        if used2[t.racine] + t.size <= quota.get(t.racine, 0):
             selected.add(i)
-            used[t.racine] += t.size
+            used2[t.racine] += t.size
 
     return selected, quota
 
@@ -500,7 +599,8 @@ def read_existing(path: str):
         return None, None
 
 
-def build_stats(tranches: list, selected: set, reports: list, group_of: dict, diag: dict) -> dict:
+def build_stats(tranches: list, selected: set, reports: list, group_of: dict,
+                op_scores: dict, op_uuids: dict, blacklist: set, gdiag: dict) -> dict:
     """
     Observabilité : comptage des signalements par opérateur et par groupe.
     Ne change RIEN au filtrage. Sert à savoir, dans six mois, si la domination
@@ -510,7 +610,7 @@ def build_stats(tranches: list, selected: set, reports: list, group_of: dict, di
     by_op = defaultdict(lambda: {"signalements": 0, "poids": 0.0, "tranches": set()})
     by_group = defaultdict(lambda: {"signalements": 0, "operateur": None, "racine": None})
 
-    for e164, weight, _ in reports:
+    for e164, weight, _uuid, _age in reports:
         i = locate(tranches, e164)
         if i is None:
             continue
@@ -524,14 +624,24 @@ def build_stats(tranches: list, selected: set, reports: list, group_of: dict, di
         g["racine"] = t.racine
 
     return {
-        "regle_operateur": diag,
+        "garanties": gdiag,
+        "seuils": {
+            "score_blacklist": OPERATOR_SCORE_THRESHOLD,
+            "uuid_distincts_min": OPERATOR_RULE_MIN_DISTINCT_UUIDS,
+            "duree_vie_garantie_jours": GUARANTEE_LIFETIME_DAYS,
+            "demi_vie_jours": HALF_LIFE_DAYS,
+        },
+        "operateurs_blacklistes": sorted(blacklist),
         "par_operateur": sorted(
             [
                 {
                     "operateur": op,
+                    "score": round(op_scores.get(op, 0.0), 2),
+                    "blackliste": op in blacklist,
                     "signalements": v["signalements"],
                     "poids_decroissant": round(v["poids"], 2),
                     "tranches_distinctes": len(v["tranches"]),
+                    "uuid_distincts": len(op_uuids.get(op, ())),
                 }
                 for op, v in by_op.items()
             ],
@@ -586,16 +696,22 @@ def main():
     # Budget MAJNUM = plafond moins le budget réservé aux priority
     budget = max(0, MAX_ENTRIES - len(priority))
 
-    dominant, diag = compute_dominant_operators(tranches, reports)
-    if diag["rule_active"]:
-        print(f"  Règle opérateur ACTIVE — dominants : {sorted(dominant) or 'aucun'}")
-    else:
-        print(f"  Règle opérateur inerte ({diag['reports_on_known_racines']} signalements, "
-              f"{diag['distinct_uuids']} UUID — seuils : {OPERATOR_RULE_MIN_REPORTS}/"
-              f"{OPERATOR_RULE_MIN_DISTINCT_UUIDS})")
+    op_scores, op_uuids, blacklist = compute_operator_scores(tranches, reports)
+    if op_scores:
+        top = sorted(op_scores.items(), key=lambda x: -x[1])[:3]
+        print("  Scores opérateurs (top 3) : " + ", ".join(
+            f"{op}={sc:.1f} ({len(op_uuids[op])} UUID)" for op, sc in top))
+    print(f"  Opérateurs blacklistés : {sorted(blacklist) or 'aucun'} "
+          f"(seuils : score ≥ {OPERATOR_SCORE_THRESHOLD}, "
+          f"≥ {OPERATOR_RULE_MIN_DISTINCT_UUIDS} UUID distincts)")
 
-    scores = compute_scores(tranches, group_of, reports, dominant)
-    selected, quota = select_tranches(tranches, scores, budget)
+    guaranteed, gdiag = compute_guaranteed(tranches, group_of, reports, blacklist)
+    print(f"  Garanties : {gdiag['directes']} directes + {gdiag['groupe_contigu']} "
+          f"groupe + {gdiag['operateur_blackliste']} opérateur "
+          f"= {gdiag['cout_numeros']:,} numéros hors quota")
+
+    scores = compute_scores(tranches, group_of, reports, op_scores)
+    selected, quota = select_tranches(tranches, scores, guaranteed, budget)
     racines = to_racines_dict(tranches, selected)
     covered = sum(tranches[i].size for i in selected)
 
@@ -650,7 +766,8 @@ def main():
     # Fichier de stats séparé : observation uniquement, aucun impact filtrage.
     stats_path = os.path.join(os.path.dirname(output_path) or ".", "stats.json")
     with open(stats_path, "w", encoding="utf-8") as f:
-        json.dump(build_stats(tranches, selected, reports, group_of, diag),
+        json.dump(build_stats(tranches, selected, reports, group_of,
+                              op_scores, op_uuids, blacklist, gdiag),
                   f, indent=2, ensure_ascii=False)
 
     size = os.path.getsize(output_path)
