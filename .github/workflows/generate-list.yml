@@ -23,7 +23,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Générer demarchage_france.json
+      - name: Générer la liste
         env:
           SIGNALEMENTS_URL: ${{ secrets.SIGNALEMENTS_URL }}
         run: |
@@ -33,10 +33,23 @@ jobs:
         run: |
           git config user.name "Serein Bot"
           git config user.email "bot@serein.local"
-          if git diff --quiet demarchage_france.json; then
+
+          # Le script produit TROIS fichiers :
+          #   - demarchage_france.json    → la liste, consommée par l'app
+          #   - tranches_operateurs.json → table tranche→opérateur, lue par l'Apps Script
+          #   - stats.json               → observation (signalements par opérateur/groupe)
+          #
+          # ⚠️ On indexe AVANT de tester. `git diff` seul ne voit pas les fichiers
+          # NON SUIVIS : tranches_operateurs.json et stats.json étant nouveaux, ils
+          # étaient invisibles pour lui — écrits par le script, puis jetés à la fin
+          # du job. C'est ce qui les empêchait d'être publiés.
+          git add demarchage_france.json stats.json tranches_operateurs.json
+
+          # `--cached` teste l'index, donc bien les trois fichiers, nouveaux comme
+          # modifiés. Le comportement « ne publie que si ça a changé » est conservé.
+          if git diff --cached --quiet; then
             echo "Contenu inchangé, rien à publier."
           else
-            git add demarchage_france.json
             git commit -m "Mise à jour de la liste anti-démarchage"
             git push
             echo "Liste mise à jour et publiée."
