@@ -15,10 +15,10 @@
   "par_operateur": [
     {
       "operateur": "KAVE",
-      "score": 1.86,
+      "score": 1.85,
       "blackliste": false,
       "signalements": 2,
-      "poids_decroissant": 1.86,
+      "poids_decroissant": 1.85,
       "tranches_distinctes": 1,
       "uuid_distincts": 0
     },
