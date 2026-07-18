@@ -15,21 +15,21 @@
   "par_operateur": [
     {
       "operateur": "KAVE",
-      "score": 1.85,
+      "score": 1.84,
       "blackliste": false,
       "signalements": 2,
-      "poids_decroissant": 1.85,
+      "poids_decroissant": 1.84,
       "tranches_distinctes": 1,
       "uuid_distincts": 0
     },
     {
       "operateur": "QWLK",
-      "score": 0.99,
+      "score": 1.98,
       "blackliste": false,
-      "signalements": 1,
-      "poids_decroissant": 0.99,
+      "signalements": 2,
+      "poids_decroissant": 1.98,
       "tranches_distinctes": 1,
-      "uuid_distincts": 1
+      "uuid_distincts": 2
     }
   ],
   "groupes_les_plus_signales": [
@@ -43,7 +43,7 @@
       "groupe": 522,
       "operateur": "QWLK",
       "racine": "0948",
-      "signalements": 1
+      "signalements": 2
     }
   ]
 }
