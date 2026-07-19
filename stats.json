@@ -24,12 +24,12 @@
     },
     {
       "operateur": "QWLK",
-      "score": 1.98,
+      "score": 1.0,
       "blackliste": false,
-      "signalements": 2,
-      "poids_decroissant": 1.98,
+      "signalements": 1,
+      "poids_decroissant": 1.0,
       "tranches_distinctes": 1,
-      "uuid_distincts": 2
+      "uuid_distincts": 1
     }
   ],
   "groupes_les_plus_signales": [
@@ -43,7 +43,7 @@
       "groupe": 522,
       "operateur": "QWLK",
       "racine": "0948",
-      "signalements": 2
+      "signalements": 1
     }
   ]
 }
