@@ -15,19 +15,19 @@
   "par_operateur": [
     {
       "operateur": "KAVE",
-      "score": 1.84,
+      "score": 1.82,
       "blackliste": false,
       "signalements": 2,
-      "poids_decroissant": 1.84,
+      "poids_decroissant": 1.82,
       "tranches_distinctes": 1,
       "uuid_distincts": 0
     },
     {
       "operateur": "QWLK",
-      "score": 1.0,
+      "score": 0.99,
       "blackliste": false,
       "signalements": 1,
-      "poids_decroissant": 1.0,
+      "poids_decroissant": 0.99,
       "tranches_distinctes": 1,
       "uuid_distincts": 1
     }
