@@ -1,15 +1,4 @@
 {
-  "generated": "2026-10-21",
-  "par_operateur": [
-    {
-      "operateur": "KAVE",
-      "signalements": 2,
-      "tranches_distinctes": 1
-    },
-    {
-      "operateur": "QWLK",
-      "signalements": 1,
-      "tranches_distinctes": 1
-    }
-  ]
+  "generated": "2026-10-22",
+  "par_operateur": []
 }
